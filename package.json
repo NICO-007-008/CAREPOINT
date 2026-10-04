@@ -1,0 +1,28 @@
+{
+  "name": "carepoint-app",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "vite": "^8.2.2",
+    "vite-plugin-static-copy": "^4.1.1"
+  },
+"dependencies": {
+    "@capacitor/android": "^8.5.1",
+    "@capacitor/app": "^8.1.1",
+    "@capacitor/browser": "^8.0.4",
+    "@capacitor/cli": "^8.5.1",
+    "@capacitor/core": "^8.5.1",
+    "@capawesome/capacitor-google-sign-in": "^0.1.4",
+    "@ionic/core": "^9.0.3",
+    "xendit-node": "^1.6.0",
+    "build": "^0.1.4",
+    "npm": "^12.0.2",
+    "run": "^2.1.4"
+  }
+}
