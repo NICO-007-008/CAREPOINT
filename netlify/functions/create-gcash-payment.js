@@ -49,7 +49,8 @@ export async function handler(event) {
       body: JSON.stringify(payload),
     });
 
-    const result = await response.json();
+    const text = await response.text();
+    const result = text ? JSON.parse(text) : {};
 
     if (!response.ok) {
       console.error('PayMongo error:', result);
