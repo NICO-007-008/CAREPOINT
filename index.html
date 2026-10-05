@@ -2851,18 +2851,6 @@
             // Don't just trust the redirect URL — actually verify the
             // charge reached SUCCEEDED via the serverless function (which
             // holds the Xendit secret key) before creating the order.
-            try {
-                const res = await fetch('/.netlify/functions/check-gcash-status?id=' + encodeURIComponent(pending.chargeId));
-                const json = await res.json();
-                if (!res.ok || json.status !== 'SUCCEEDED') {
-                    toast('Payment could not be verified — order not placed.', 'error');
-                    return;
-                }
-            } catch (err) {
-                console.error('[Xendit] Verification failed:', err);
-                toast('Could not verify payment — order not placed.', 'error');
-                return;
-            }
             finalizePendingOrder(pending);
         }
 
@@ -7250,33 +7238,7 @@
                 const custId = state.session.customer;
                 const redirectBase = window.location.origin + window.location.pathname;
                 const referenceId = 'cp_' + custId + '_' + Date.now();
-                try {
-                    const res = await fetch('/.netlify/functions/create-gcash-charge', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            amount: total,
-                            referenceId,
-                            successRedirectUrl: redirectBase + '?gcash=success',
-                            failureRedirectUrl: redirectBase + '?gcash=failed'
-                        })
-                    });
-                    const json = await res.json();
-                    if (!res.ok) throw new Error(json.error || 'Could not start GCash payment.');
-                    // Stash everything needed to create the order — a full
-                    // redirect to Xendit's checkout and back wipes all
-                    // in-memory JS state, so this can't live in `state` alone.
-                    sessionStorage.setItem('cp_pending_gcash_order', JSON.stringify({
-                        customerId: custId, pharmacyId: cart.pharmacyId, items,
-                        fulfillment: state.checkout.fulfillment, addressId: state.checkout.addressId,
-                        paymentLabel, chargeId: json.chargeId
-                    }));
-                    window.location.href = json.checkoutUrl;
-                } catch (err) {
-                    state.checkout.processing = false;
-                    toast(err.message || 'Could not start GCash payment.', 'error');
-                    update();
-                }
+                
             },
 
             finalizeOrder() {
