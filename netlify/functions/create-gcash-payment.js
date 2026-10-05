@@ -50,6 +50,7 @@ export async function handler(event) {
     });
 
     const text = await response.text();
+    console.log('PayMongo raw response:', text.substring(0, 500));
     const result = text ? JSON.parse(text) : {};
 
     if (!response.ok) {
