@@ -2158,11 +2158,8 @@
 
         /* ---------- Third-party API config ----------
            EmailJS's Public Key is safe for client-side use by design.
-           GCash payments go through Xendit, but Xendit's e-wallet API needs
-           a SECRET key — that lives server-side in Netlify environment
-           variables (XENDIT_SECRET_KEY) and is called via the serverless
-           functions in /netlify/functions, never directly from this file. */
-        const EMAILJS_PUBLIC_KEY = 'MIsfg-BHEugw7o5MY';
+           Payments are recorded in-app only (no payment gateway). */
+const EMAILJS_PUBLIC_KEY = 'MIsfg-BHEugw7o5MY';
         const EMAILJS_SERVICE_ID = 'service_n3aj3k5';
         const EMAILJS_TEMPLATE_ID = 'template_66t8l0s';
         const supabaseConfigured = SUPABASE_URL && SUPABASE_ANON_KEY
@@ -2806,64 +2803,6 @@
             if (idx === -1) DB.customers.push(incoming);
             else DB.customers[idx] = incoming;
             update();
-        }
-
-        /* ---------- Xendit: real GCash payment gateway ----------
-           A GCash payment fully leaves the app (Xendit's hosted GCash
-           checkout), so the order can't be created until the customer is
-           redirected back — see payWithGcash() above for how the request
-           gets sent. This is the return half. */
-        function finalizePendingOrder(pending) {
-            const id = 'o' + (counters.order++);
-            const items = pending.items;
-            items.forEach(it => { const med = medicine(it.medId);
-                if (med) { med.stock -= it.qty; med.sold = (med.sold || 0) + it.qty; } });
-            const newOrder = { id, customerId: pending.customerId, pharmacyId: pending.pharmacyId, items,
-                fulfillment: pending.fulfillment, addressId: pending.addressId, status: 'pending',
-                createdAt: new Date(), paymentMethod: 'gcash', paymentLabel: pending.paymentLabel };
-            DB.orders.push(newOrder);
-            items.forEach(it => { const med = medicine(it.medId); if (med) sbUpsert('medicines', med); });
-            sbUpsert('orders', newOrder);
-            notifyOrderEvent(order(id), 'orderPlaced');
-            sendReceiptEmail(newOrder);
-            delete state.carts[pending.customerId];
-            state.checkout = { fulfillment: 'pickup', addressId: null, paymentMethod: 'card', processing: false };
-            if (state.session.customer === pending.customerId) state.customer.view = 'orders';
-            toast('Order #' + id.replace('o', '') + ' placed via GCash!', 'success');
-            update();
-        }
-        async function checkGcashReturn() {
-            const params = new URLSearchParams(window.location.search);
-            const gcashStatus = params.get('gcash');
-            if (!gcashStatus) return;
-            // Clean the URL immediately so a later refresh can't re-trigger this.
-            window.history.replaceState({}, '', window.location.origin + window.location.pathname);
-
-            const pendingRaw = sessionStorage.getItem('cp_pending_gcash_order');
-            sessionStorage.removeItem('cp_pending_gcash_order');
-            if (!pendingRaw) return;
-            const pending = JSON.parse(pendingRaw);
-
-            if (gcashStatus !== 'success') {
-                toast('GCash payment was not completed — order not placed.', 'error');
-                return;
-            }
-            // Don't just trust the redirect URL — actually verify the
-            // charge reached SUCCEEDED via the serverless function (which
-            // holds the Xendit secret key) before creating the order.
-            try {
-                const res = await fetch('/.netlify/functions/check-gcash-status?id=' + encodeURIComponent(pending.chargeId));
-                const json = await res.json();
-                if (!res.ok || json.status !== 'SUCCEEDED') {
-                    toast('Payment could not be verified — order not placed.', 'error');
-                    return;
-                }
-            } catch (err) {
-                console.error('[Xendit] Verification failed:', err);
-                toast('Could not verify payment — order not placed.', 'error');
-                return;
-            }
-            finalizePendingOrder(pending);
         }
 
         /* Keep a snapshot of the built-in seed so we can upload it if Supabase is empty. */
@@ -5305,7 +5244,7 @@
                 const brand = method === 'gcash' ? 'GCash' : 'PayMaya';
                 return `<div class="pay-fields">
                     <div class="field"><label for="ewalletNumber">${brand}-registered mobile number</label><input type="text" id="ewalletNumber" class="mono-input" placeholder="09XX XXX XXXX" inputmode="tel" autocomplete="tel"></div>
-                    <p class="hint">${method === 'gcash' ? `You’ll be taken to ${brand} to approve this payment, then brought back here.` : `You'll get a one-time PIN in the ${brand} app to confirm this payment.`}</p>
+                    <p class="hint">You'll get a one-time PIN in the ${brand} app to confirm this payment.</p>
                   </div>`;
             }
             if (method === 'paypal') {
@@ -7212,20 +7151,12 @@
                     if (!cardName || !cardNumber || !cardExpiry || !cardCvv) { toast(
                             'Complete card details.', 'error'); return; }
                     paymentLabel = 'Card •••• ' + cardNumber.replace(/\s/g, '').slice(-4);
-                } else if (method === 'gcash') {
-                    // Real payment gateway — hands off to PayMongo entirely,
-                    // including the redirect and order creation on return.
+                } else if (method === 'gcash' || method === 'paymaya') {
+                    const brand = method === 'gcash' ? 'GCash' : 'PayMaya';
                     const num = (document.getElementById('ewalletNumber') || {}).value?.trim();
                     if (!num || num.replace(/\D/g, '').length < 10) { toast(
-                            'Enter a valid GCash mobile number.', 'error'); return; }
-                    paymentLabel = 'GCash •••• ' + num.replace(/\D/g, '').slice(-4);
-                    App.payWithGcash(cart, paymentLabel);
-                    return;
-                } else if (method === 'paymaya') {
-                    const num = (document.getElementById('ewalletNumber') || {}).value?.trim();
-                    if (!num || num.replace(/\D/g, '').length < 10) { toast(
-                            'Enter a valid PayMaya mobile number.', 'error'); return; }
-                    paymentLabel = 'PayMaya •••• ' + num.replace(/\D/g, '').slice(-4);
+                            'Enter a valid ' + brand + ' mobile number.', 'error'); return; }
+                    paymentLabel = brand + ' •••• ' + num.replace(/\D/g, '').slice(-4);
                 } else if (method === 'paypal') {
                     const email = (document.getElementById('paypalEmail') || {}).value?.trim();
                     if (!email || !email.includes('@')) { toast('Enter a valid PayPal email.', 'error'); return; }
@@ -7237,46 +7168,9 @@
                 state.checkout.processing = true;
                 state.checkout._pending = { method, paymentLabel };
                 update();
-                const gatewayName = { card: 'Stripe', paypal: 'PayPal', paymaya: 'PayMaya' }[method];
+                const gatewayName = { card: 'Stripe', gcash: 'GCash', paypal: 'PayPal', paymaya: 'PayMaya' }[method];
                 toast(gatewayName ? 'Processing payment via ' + gatewayName + '…' : 'Confirming order…', 'success');
                 setTimeout(() => App.finalizeOrder(), 1100);
-            },
-
-            async payWithGcash(cart, paymentLabel) {
-                state.checkout.processing = true;
-                update();
-                const items = cart.items.map(it => ({ medId: it.medId, qty: it.qty, price: medicine(it.medId).price }));
-                const total = items.reduce((s, it) => s + it.price * it.qty, 0);
-                const custId = state.session.customer;
-                const redirectBase = window.location.origin + window.location.pathname;
-                const referenceId = 'cp_' + custId + '_' + Date.now();
-                try {
-                    const res = await fetch('/.netlify/functions/create-gcash-charge', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            amount: total,
-                            referenceId,
-                            successRedirectUrl: redirectBase + '?gcash=success',
-                            failureRedirectUrl: redirectBase + '?gcash=failed'
-                        })
-                    });
-                    const json = await res.json();
-                    if (!res.ok) throw new Error(json.error || 'Could not start GCash payment.');
-                    // Stash everything needed to create the order — a full
-                    // redirect to Xendit's checkout and back wipes all
-                    // in-memory JS state, so this can't live in `state` alone.
-                    sessionStorage.setItem('cp_pending_gcash_order', JSON.stringify({
-                        customerId: custId, pharmacyId: cart.pharmacyId, items,
-                        fulfillment: state.checkout.fulfillment, addressId: state.checkout.addressId,
-                        paymentLabel, chargeId: json.chargeId
-                    }));
-                    window.location.href = json.checkoutUrl;
-                } catch (err) {
-                    state.checkout.processing = false;
-                    toast(err.message || 'Could not start GCash payment.', 'error');
-                    update();
-                }
             },
 
             finalizeOrder() {
@@ -8405,7 +8299,6 @@
                         resolveAuthSession(sess.user);
                     }
                 });
-                await checkGcashReturn();
             }
             update();
             // Fade out our branded boot screen now that real content is
