@@ -2158,7 +2158,9 @@
 
         /* ---------- Third-party API config ----------
            EmailJS's Public Key is safe for client-side use by design.
-           Payments are recorded in-app only (no payment gateway). */
+           GCash payments go through PayMongo. Its SECRET key lives only in Netlify
+           environment variables (PAYMONGO_SECRET_KEY) and is used by the
+           functions in /netlify/functions - never put it in this file. */
 const EMAILJS_PUBLIC_KEY = 'MIsfg-BHEugw7o5MY';
         const EMAILJS_SERVICE_ID = 'service_n3aj3k5';
         const EMAILJS_TEMPLATE_ID = 'template_66t8l0s';
@@ -2803,6 +2805,56 @@ const EMAILJS_PUBLIC_KEY = 'MIsfg-BHEugw7o5MY';
             if (idx === -1) DB.customers.push(incoming);
             else DB.customers[idx] = incoming;
             update();
+        }
+
+        /* ---------- PayMongo GCash: return from GCash ----------
+           GCash leaves the app entirely, so the order is only created after
+           the customer comes back AND PayMongo confirms the payment. */
+        function finalizePendingOrder(pending) {
+            const id = 'o' + (counters.order++);
+            const items = pending.items;
+            items.forEach(it => { const med = medicine(it.medId);
+                if (med) { med.stock -= it.qty; med.sold = (med.sold || 0) + it.qty; } });
+            const newOrder = { id, customerId: pending.customerId, pharmacyId: pending.pharmacyId, items,
+                fulfillment: pending.fulfillment, addressId: pending.addressId, status: 'pending',
+                createdAt: new Date(), paymentMethod: 'gcash', paymentLabel: pending.paymentLabel };
+            DB.orders.push(newOrder);
+            items.forEach(it => { const med = medicine(it.medId); if (med) sbUpsert('medicines', med); });
+            sbUpsert('orders', newOrder);
+            notifyOrderEvent(order(id), 'orderPlaced');
+            sendReceiptEmail(newOrder);
+            delete state.carts[pending.customerId];
+            state.checkout = { fulfillment: 'pickup', addressId: null, paymentMethod: 'card', processing: false };
+            if (state.session.customer === pending.customerId) state.customer.view = 'orders';
+            toast('Order #' + id.replace('o', '') + ' placed via GCash!', 'success');
+            update();
+        }
+        async function checkGcashReturn() {
+            const params = new URLSearchParams(window.location.search);
+            if (!params.get('gcash')) return;
+            // Clean the URL so a refresh can't re-trigger this.
+            window.history.replaceState({}, '', window.location.origin + window.location.pathname);
+
+            const pendingRaw = sessionStorage.getItem('cp_pending_gcash_order');
+            sessionStorage.removeItem('cp_pending_gcash_order');
+            if (!pendingRaw) return;
+            const pending = JSON.parse(pendingRaw);
+
+            // PayMongo sends the customer back for both success and failure,
+            // so never trust the URL - ask PayMongo for the real status.
+            try {
+                const res = await fetch('/.netlify/functions/check-gcash-payment?id=' + encodeURIComponent(pending.intentId));
+                const json = await res.json();
+                if (!res.ok || json.status !== 'succeeded') {
+                    toast('GCash payment was not completed — order not placed.', 'error');
+                    return;
+                }
+            } catch (err) {
+                console.error('[PayMongo] Verification failed:', err);
+                toast('Could not verify payment — order not placed.', 'error');
+                return;
+            }
+            finalizePendingOrder(pending);
         }
 
         /* Keep a snapshot of the built-in seed so we can upload it if Supabase is empty. */
@@ -5244,7 +5296,7 @@ const EMAILJS_PUBLIC_KEY = 'MIsfg-BHEugw7o5MY';
                 const brand = method === 'gcash' ? 'GCash' : 'PayMaya';
                 return `<div class="pay-fields">
                     <div class="field"><label for="ewalletNumber">${brand}-registered mobile number</label><input type="text" id="ewalletNumber" class="mono-input" placeholder="09XX XXX XXXX" inputmode="tel" autocomplete="tel"></div>
-                    <p class="hint">You'll get a one-time PIN in the ${brand} app to confirm this payment.</p>
+                    <p class="hint">${method === 'gcash' ? `You’ll be taken to ${brand} to approve this payment, then brought back here.` : `You'll get a one-time PIN in the ${brand} app to confirm this payment.`}</p>
                   </div>`;
             }
             if (method === 'paypal') {
@@ -7157,6 +7209,7 @@ const EMAILJS_PUBLIC_KEY = 'MIsfg-BHEugw7o5MY';
                     if (!num || num.replace(/\D/g, '').length < 10) { toast(
                             'Enter a valid ' + brand + ' mobile number.', 'error'); return; }
                     paymentLabel = brand + ' •••• ' + num.replace(/\D/g, '').slice(-4);
+                    if (method === 'gcash') { App.payWithGcash(cart, paymentLabel); return; }
                 } else if (method === 'paypal') {
                     const email = (document.getElementById('paypalEmail') || {}).value?.trim();
                     if (!email || !email.includes('@')) { toast('Enter a valid PayPal email.', 'error'); return; }
@@ -7171,6 +7224,47 @@ const EMAILJS_PUBLIC_KEY = 'MIsfg-BHEugw7o5MY';
                 const gatewayName = { card: 'Stripe', gcash: 'GCash', paypal: 'PayPal', paymaya: 'PayMaya' }[method];
                 toast(gatewayName ? 'Processing payment via ' + gatewayName + '…' : 'Confirming order…', 'success');
                 setTimeout(() => App.finalizeOrder(), 1100);
+            },
+
+            async payWithGcash(cart, paymentLabel) {
+                state.checkout.processing = true;
+                update();
+                const items = cart.items.map(it => ({ medId: it.medId, qty: it.qty, price: medicine(it.medId).price }));
+                const subtotal = items.reduce((s, it) => s + it.price * it.qty, 0);
+                const deliveryFee = state.checkout.fulfillment === 'delivery' ? deliveryFeeFor(subtotal) : 0;
+                const total = Math.round((subtotal + deliveryFee) * 100) / 100;
+                const custId = state.session.customer;
+                const returnUrl = window.location.origin + window.location.pathname + '?gcash=return';
+                const referenceId = 'cp_' + custId + '_' + Date.now();
+                try {
+                    const res = await fetch('/.netlify/functions/create-gcash-payment', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ amount: total, referenceId, returnUrl })
+                    });
+                    const raw = await res.text();
+                    let json;
+                    try { json = JSON.parse(raw); } catch (e) {
+                        console.error('[GCash] Non-JSON response', res.status, raw.slice(0, 300));
+                        throw new Error('Payment server not reachable (HTTP ' + res.status + ').');
+                    }
+                    if (!res.ok || !json.checkoutUrl) {
+                        console.error('[GCash] Error response', res.status, json);
+                        throw new Error(json.error || 'Could not start GCash payment.');
+                    }
+                    // A full redirect to GCash and back wipes in-memory state,
+                    // so everything needed to create the order is stashed here.
+                    sessionStorage.setItem('cp_pending_gcash_order', JSON.stringify({
+                        customerId: custId, pharmacyId: cart.pharmacyId, items,
+                        fulfillment: state.checkout.fulfillment, addressId: state.checkout.addressId,
+                        paymentLabel, intentId: json.intentId
+                    }));
+                    window.location.href = json.checkoutUrl;
+                } catch (err) {
+                    state.checkout.processing = false;
+                    toast(err.message || 'Could not start GCash payment.', 'error');
+                    update();
+                }
             },
 
             finalizeOrder() {
@@ -8299,6 +8393,7 @@ const EMAILJS_PUBLIC_KEY = 'MIsfg-BHEugw7o5MY';
                         resolveAuthSession(sess.user);
                     }
                 });
+                await checkGcashReturn();
             }
             update();
             // Fade out our branded boot screen now that real content is

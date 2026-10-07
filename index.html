@@ -2825,7 +2825,10 @@ const EMAILJS_PUBLIC_KEY = 'MIsfg-BHEugw7o5MY';
             sendReceiptEmail(newOrder);
             delete state.carts[pending.customerId];
             state.checkout = { fulfillment: 'pickup', addressId: null, paymentMethod: 'card', processing: false };
-            if (state.session.customer === pending.customerId) state.customer.view = 'orders';
+            if (state.session.customer === pending.customerId) {
+                state.customer.view = 'receipt';
+                state.customer.orderId = id;
+            }
             toast('Order #' + id.replace('o', '') + ' placed via GCash!', 'success');
             update();
         }
