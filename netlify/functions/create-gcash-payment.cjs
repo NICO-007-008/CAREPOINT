@@ -1,14 +1,23 @@
 // Creates a PayMongo Payment Intent + GCash Payment Method, attaches them,
 // and returns the GCash redirect URL. The secret key stays on the server.
+// CORS headers are included because the Android app (origin https://localhost)
+// calls this function cross-origin.
 const API = 'https://api.paymongo.com/v1';
+
+const CORS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'Content-Type',
+  'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+};
 
 const json = (statusCode, body) => ({
   statusCode,
-  headers: { 'Content-Type': 'application/json' },
+  headers: { 'Content-Type': 'application/json', ...CORS },
   body: JSON.stringify(body),
 });
 
 exports.handler = async (event) => {
+  if (event.httpMethod === 'OPTIONS') return { statusCode: 204, headers: CORS, body: '' };
   if (event.httpMethod !== 'POST') return json(405, { error: 'Method not allowed' });
 
   const key = process.env.PAYMONGO_SECRET_KEY;
